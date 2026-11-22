@@ -1,0 +1,524 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brain MRI Classification</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 30px 16px;
+            font-family: Arial, sans-serif;
+            background: #f1f5f9;
+            color: #1e293b;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: auto;
+            padding: 30px;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 8px 30px rgba(0,0,0,.08);
+        }
+
+        h1 {
+            text-align: center;
+            color: #1d4ed8;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #64748b;
+            margin-bottom: 28px;
+        }
+
+        label {
+            display: block;
+            margin: 18px 0 8px;
+            font-weight: bold;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            background: white;
+        }
+
+        button {
+            width: 100%;
+            padding: 14px;
+            margin-top: 20px;
+            border: none;
+            border-radius: 8px;
+            background: #2563eb;
+            color: white;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #1d4ed8;
+        }
+
+        button:disabled {
+            opacity: .6;
+            cursor: wait;
+        }
+
+        #preview {
+            display: none;
+            max-width: 100%;
+            max-height: 320px;
+            margin: 18px auto;
+            border-radius: 8px;
+            object-fit: contain;
+        }
+
+        .result {
+            margin-top: 25px;
+            padding: 20px;
+            border-radius: 10px;
+            background: #eff6ff;
+            overflow-wrap: anywhere;
+        }
+
+        .error {
+            color: #b91c1c;
+            background: #fef2f2;
+        }
+
+        .model-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 18px;
+            margin-top: 20px;
+        }
+
+        .model-card {
+            padding: 18px;
+            background: white;
+            border: 1px solid #bfdbfe;
+            border-radius: 10px;
+        }
+
+        .model-card h3 {
+            margin-top: 0;
+            color: #1d4ed8;
+        }
+
+        .prediction-class {
+            font-size: 19px;
+            font-weight: bold;
+            color: #166534;
+        }
+
+        .model-info {
+            color: #475569;
+            font-size: 14px;
+            line-height: 1.7;
+        }
+
+        .score-row {
+            margin-top: 12px;
+        }
+
+        .score-label {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            font-size: 14px;
+        }
+
+        .bar {
+            height: 8px;
+            margin-top: 6px;
+            background: #dbeafe;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .bar-fill {
+            height: 100%;
+            background: #2563eb;
+        }
+
+        #downloadReport {
+            display: none;
+            background: #15803d;
+        }
+
+        #downloadReport:hover {
+            background: #166534;
+        }
+
+        .disclaimer {
+            margin-top: 24px;
+            padding: 14px;
+            background: #fff7ed;
+            border-radius: 8px;
+            color: #9a3412;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        @media (max-width: 500px) {
+            .container {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+<main class="container">
+
+    <h1>Brain MRI Classification</h1>
+
+    <p class="subtitle">
+        Educational brain MRI classification using MobileNetV2
+        and Custom CNN
+    </p>
+
+    <form id="uploadForm">
+
+        <label for="patientName">Patient name (optional)</label>
+        <input type="text" id="patientName"
+               name="patientName" maxlength="100">
+
+        <label for="referenceId">Reference ID (optional)</label>
+        <input type="text" id="referenceId"
+               name="referenceId" maxlength="100">
+
+        <label for="age">Age (optional)</label>
+        <input type="number" id="age"
+               name="age" min="0" max="120">
+
+        <label for="sex">Sex (optional)</label>
+        <select id="sex" name="sex">
+            <option value="">Prefer not to specify</option>
+            <option value="Female">Female</option>
+            <option value="Male">Male</option>
+            <option value="Other">Other</option>
+        </select>
+
+        <label for="model_choice">Select Classification Model</label>
+
+        <select id="model_choice" name="model_choice">
+            <option value="mobilenet">MobileNetV2 Only</option>
+            <option value="custom_cnn">Custom CNN V1 Only</option>
+            <option value="compare">Compare Both Models</option>
+        </select>
+
+        <label for="image">Choose an MRI image (required)</label>
+
+        <input
+            type="file"
+            id="image"
+            name="image"
+            accept="image/jpeg,image/png,image/webp"
+            required
+        >
+
+        <img id="preview" alt="Selected MRI image preview">
+
+        <button type="submit" id="submitButton">
+            Classify MRI Image
+        </button>
+
+    </form>
+
+    <section id="result" class="result" hidden
+             aria-live="polite"></section>
+
+    <button type="button" id="downloadReport">
+        Download PDF Report
+    </button>
+
+    <div class="disclaimer">
+        <strong>Important:</strong>
+        This application is for educational research only.
+        AI predictions and scores are not medical diagnoses or
+        calibrated medical probabilities. Do not use this application
+        to make medical decisions. Consult a qualified medical
+        professional for clinical interpretation.
+    </div>
+
+</main>
+
+<script>
+    const form = document.getElementById("uploadForm");
+    const imageInput = document.getElementById("image");
+    const preview = document.getElementById("preview");
+    const result = document.getElementById("result");
+    const submitButton = document.getElementById("submitButton");
+    const downloadButton = document.getElementById("downloadReport");
+
+    let previewUrl = null;
+    let predictionSucceeded = false;
+
+    function showError(message) {
+        result.hidden = false;
+        result.className = "result error";
+        result.textContent = message;
+    }
+
+    // Reset previous results when a new image is selected.
+    imageInput.addEventListener("change", () => {
+
+        if (previewUrl) {
+            URL.revokeObjectURL(previewUrl);
+        }
+
+        previewUrl = null;
+        preview.style.display = "none";
+        predictionSucceeded = false;
+        downloadButton.style.display = "none";
+
+        const file = imageInput.files[0];
+
+        if (!file) return;
+
+        if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+            imageInput.value = "";
+            showError("Please select a JPEG, PNG, or WebP image.");
+            return;
+        }
+
+        if (file.size > 10 * 1024 * 1024) {
+            imageInput.value = "";
+            showError("The image must be 10 MB or smaller.");
+            return;
+        }
+
+        previewUrl = URL.createObjectURL(file);
+        preview.src = previewUrl;
+        preview.style.display = "block";
+        result.hidden = true;
+    });
+
+    // Create a score bar for each tumor class.
+    function createScoreRow(name, score) {
+
+        const row = document.createElement("div");
+        row.className = "score-row";
+
+        const label = document.createElement("div");
+        label.className = "score-label";
+
+        const nameSpan = document.createElement("span");
+        nameSpan.textContent = name;
+
+        const valueSpan = document.createElement("span");
+        valueSpan.textContent =
+            (Number(score) * 100).toFixed(2) + "%";
+
+        label.append(nameSpan, valueSpan);
+
+        const bar = document.createElement("div");
+        bar.className = "bar";
+
+        const fill = document.createElement("div");
+        fill.className = "bar-fill";
+
+        fill.style.width =
+            Math.max(0, Math.min(100, Number(score) * 100)) + "%";
+
+        bar.appendChild(fill);
+        row.append(label, bar);
+
+        return row;
+    }
+
+    // Display the result of one model.
+    function createModelCard(modelKey, data) {
+
+        const card = document.createElement("div");
+        card.className = "model-card";
+
+        const heading = document.createElement("h3");
+        heading.textContent = data.model_name;
+
+        const prediction = document.createElement("p");
+        prediction.textContent = "Predicted class:";
+
+        const predictedClass = document.createElement("div");
+        predictedClass.className = "prediction-class";
+        predictedClass.textContent = data.predicted_class;
+
+        const confidence = document.createElement("p");
+        confidence.className = "model-info";
+        confidence.textContent =
+            "Prediction confidence: " +
+            (data.confidence * 100).toFixed(2) + "%";
+
+        const accuracy = document.createElement("p");
+        accuracy.className = "model-info";
+        accuracy.textContent =
+            "Test-set accuracy: " +
+            Number(data.test_accuracy).toFixed(2) + "%";
+
+        const scoresHeading = document.createElement("h4");
+        scoresHeading.textContent = "Class Scores";
+
+        card.append(
+            heading,
+            prediction,
+            predictedClass,
+            confidence,
+            accuracy,
+            scoresHeading
+        );
+
+        for (const [name, score] of Object.entries(data.scores)) {
+            card.appendChild(createScoreRow(name, score));
+        }
+
+        return card;
+    }
+
+    // Submit image and selected model to Flask.
+    form.addEventListener("submit", async (event) => {
+
+        event.preventDefault();
+
+        predictionSucceeded = false;
+        downloadButton.style.display = "none";
+
+        if (!imageInput.files[0]) {
+            showError("Please select an MRI image.");
+            return;
+        }
+
+        submitButton.disabled = true;
+        submitButton.textContent = "Processing image...";
+
+        result.hidden = false;
+        result.className = "result";
+        result.textContent = "Processing your MRI image...";
+
+        try {
+
+            const response = await fetch("/predict", {
+                method: "POST",
+                body: new FormData(form)
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || "Prediction failed.");
+            }
+
+            result.replaceChildren();
+
+            const heading = document.createElement("h2");
+            heading.textContent = "Prediction Results";
+
+            const selectedModel = document.createElement("p");
+            selectedModel.textContent =
+                data.model_choice === "compare"
+                    ? "Comparison of MobileNetV2 and Custom CNN V1"
+                    : "Selected model: " +
+                      Object.values(data.results)[0].model_name;
+
+            const modelGrid = document.createElement("div");
+            modelGrid.className = "model-grid";
+
+            for (const [modelKey, modelResult] of Object.entries(data.results)) {
+                modelGrid.appendChild(
+                    createModelCard(modelKey, modelResult)
+                );
+            }
+
+            const disclaimer = document.createElement("p");
+            disclaimer.textContent = data.disclaimer;
+
+            result.append(
+                heading,
+                selectedModel,
+                modelGrid,
+                disclaimer
+            );
+
+            predictionSucceeded = true;
+            downloadButton.style.display = "block";
+
+        } catch (error) {
+
+            showError(error.message || "An unexpected error occurred.");
+
+        } finally {
+
+            submitButton.disabled = false;
+            submitButton.textContent = "Classify MRI Image";
+        }
+    });
+
+    // Generate and download PDF report.
+    downloadButton.addEventListener("click", async () => {
+
+        if (!predictionSucceeded || !imageInput.files[0]) {
+            showError("Please classify an image successfully first.");
+            return;
+        }
+
+        downloadButton.disabled = true;
+        downloadButton.textContent = "Generating PDF...";
+
+        try {
+
+            const response = await fetch("/report", {
+                method: "POST",
+                body: new FormData(form)
+            });
+
+            if (!response.ok) {
+
+                let message = "Could not generate the PDF report.";
+
+                try {
+                    const data = await response.json();
+                    message = data.error || message;
+                } catch (_) {}
+
+                throw new Error(message);
+            }
+
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = "brain_mri_classification_report.pdf";
+
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+
+            URL.revokeObjectURL(url);
+
+        } catch (error) {
+
+            showError(error.message || "Could not generate the PDF report.");
+
+        } finally {
+
+            downloadButton.disabled = false;
+            downloadButton.textContent = "Download PDF Report";
+        }
+    });
+
+</script>
+
+</body>
+</html>
