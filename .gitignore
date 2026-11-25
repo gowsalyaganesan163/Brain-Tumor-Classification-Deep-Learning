@@ -13,10 +13,7 @@ dataset/
 Training/
 Testing/
 
-# Large model files
-*.keras
-*.h5
-*.weights.h5
+
 
 # ML experiments
 mlruns/
