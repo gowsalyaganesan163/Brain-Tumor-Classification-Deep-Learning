@@ -3,6 +3,8 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from xml.sax.saxutils import escape
+import gc
+import threading
 
 import numpy as np
 from flask import Flask, jsonify, render_template, request, send_file
@@ -39,7 +41,6 @@ DISCLAIMER = (
     "medical professional for clinical interpretation."
 )
 
-# Test-set metrics from your completed model evaluation.
 MODEL_INFO = {
     "mobilenet": {
         "name": "MobileNetV2",
@@ -64,25 +65,33 @@ MODEL_CHOICES = {
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
 
+# Prevent simultaneous model loads/predictions from consuming too much RAM.
+prediction_lock = threading.Lock()
+
 
 # --------------------------------------------------
-# 2. Load both trained models
+# 2. Lazy model loading
 # --------------------------------------------------
 
-models = {}
+def load_model(model_key):
+    """Load a model only when it is needed."""
 
-for model_key, info in MODEL_INFO.items():
+    if model_key not in MODEL_INFO:
+        raise ValueError("Invalid model selection.")
+
+    info = MODEL_INFO[model_key]
     model_path = MODELS_DIR / info["filename"]
 
     if not model_path.is_file():
-        raise FileNotFoundError(
-            f"Model not found: {model_path}\n"
-            "Please check that the trained model file exists."
-        )
+        raise FileNotFoundError(f"Model not found: {model_path}")
 
     print(f"Loading {info['name']}...")
-    models[model_key] = keras.models.load_model(model_path)
+
+    model = keras.models.load_model(model_path, compile=False)
+
     print(f"{info['name']} loaded successfully.")
+
+    return model
 
 
 # --------------------------------------------------
@@ -90,16 +99,8 @@ for model_key, info in MODEL_INFO.items():
 # --------------------------------------------------
 
 def prepare_uploaded_image(uploaded_file):
-    """
-    Read the uploaded MRI image and return a clean RGB image.
+    """Read the uploaded MRI image and return a clean RGB image."""
 
-    Resizing is performed separately for each model because:
-    MobileNetV2 uses 224 x 224.
-    Custom CNN V1 uses 128 x 128.
-
-    Both models have their preprocessing layers inside their
-    respective model architectures. Do not preprocess again here.
-    """
     try:
         with Image.open(uploaded_file.stream) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
@@ -112,68 +113,88 @@ def prepare_uploaded_image(uploaded_file):
 
 
 def prepare_image_for_model(image, model_key):
-    """Resize an image to the input size required by a model."""
+    """Resize an image to the size required by the selected model."""
+
     image_size = MODEL_INFO[model_key]["image_size"]
 
     resized = image.resize(image_size)
     array = np.asarray(resized, dtype=np.float32)
-
-    # Add batch dimension.
     array = np.expand_dims(array, axis=0)
 
     return array
 
 
 # --------------------------------------------------
-# 4. Prediction functions
+# 4. Prediction functions (memory optimized)
 # --------------------------------------------------
 
 def run_single_prediction(image, model_key):
-    """Run prediction using one selected model."""
+    """
+    Load one model, predict, and release it before returning.
 
-    model = models[model_key]
-    model_input = prepare_image_for_model(image, model_key)
+    Models are not cached in memory.
+    """
 
-    probabilities = model.predict(model_input, verbose=0)[0]
+    model = None
 
-    if len(probabilities) != len(CLASS_NAMES):
-        raise ValueError(
-            f"{MODEL_INFO[model_key]['name']} returned an unexpected "
-            "number of class scores."
-        )
+    try:
+        model = load_model(model_key)
 
-    predicted_index = int(np.argmax(probabilities))
+        model_input = prepare_image_for_model(image, model_key)
 
-    scores = {
-        class_name: float(score)
-        for class_name, score in zip(CLASS_NAMES, probabilities)
-    }
+        probabilities = model.predict(model_input, verbose=0)[0]
 
-    return {
-        "model_name": MODEL_INFO[model_key]["name"],
-        "predicted_class": CLASS_NAMES[predicted_index],
-        "confidence": float(probabilities[predicted_index]),
-        "scores": scores,
-        "test_accuracy": MODEL_INFO[model_key]["accuracy"],
-    }
+        if len(probabilities) != len(CLASS_NAMES):
+            raise ValueError(
+                f"{MODEL_INFO[model_key]['name']} returned an unexpected "
+                "number of class scores."
+            )
+
+        predicted_index = int(np.argmax(probabilities))
+
+        scores = {
+            class_name: float(score)
+            for class_name, score in zip(CLASS_NAMES, probabilities)
+        }
+
+        return {
+            "model_name": MODEL_INFO[model_key]["name"],
+            "predicted_class": CLASS_NAMES[predicted_index],
+            "confidence": float(probabilities[predicted_index]),
+            "scores": scores,
+            "test_accuracy": MODEL_INFO[model_key]["accuracy"],
+        }
+
+    finally:
+        # Release the model after every prediction.
+        if model is not None:
+            del model
+
+        keras.backend.clear_session()
+        gc.collect()
 
 
 def run_selected_predictions(image, model_choice):
-    """Run one or both models, depending on the user's selection."""
+    """Run the requested model(s) sequentially."""
 
     if model_choice not in MODEL_CHOICES:
         raise ValueError("Invalid model selection.")
 
     results = {}
 
-    for model_key in MODEL_CHOICES[model_choice]:
-        results[model_key] = run_single_prediction(image, model_key)
+    # Only one model is loaded at any given time.
+    with prediction_lock:
+        for model_key in MODEL_CHOICES[model_choice]:
+            results[model_key] = run_single_prediction(
+                image,
+                model_key,
+            )
 
     return results
 
 
 def read_model_choice():
-    """Read and validate the model selection sent by the website."""
+    """Read and validate model selection from the request."""
 
     choice = request.form.get("model_choice", "mobilenet").strip()
 
@@ -188,6 +209,7 @@ def read_model_choice():
 # --------------------------------------------------
 
 def read_patient_details():
+
     patient_name = (
         request.form.get("patientName", "").strip()[:100]
         or "Not provided"
@@ -201,7 +223,10 @@ def read_patient_details():
     age = request.form.get("age", "").strip()
     sex = request.form.get("sex", "").strip()
 
-    if age and (not age.isdigit() or not 0 <= int(age) <= 120):
+    if age and (
+        not age.isdigit()
+        or not 0 <= int(age) <= 120
+    ):
         raise ValueError("Age must be a whole number between 0 and 120.")
 
     if sex not in ("", "Female", "Male", "Other"):
@@ -264,25 +289,40 @@ def predict():
     try:
         model_choice = read_model_choice()
         image, _ = prepare_uploaded_image(uploaded_file)
-        results = run_selected_predictions(image, model_choice)
+
+        results = run_selected_predictions(
+            image,
+            model_choice,
+        )
 
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    # Keep the old response fields for single-model compatibility.
+    except Exception:
+        app.logger.exception("Prediction failed.")
+        return jsonify({
+            "error": (
+                "Prediction failed. The server may have insufficient memory "
+                "or the selected model could not be loaded."
+            )
+        }), 500
+
     response = {
         "model_choice": model_choice,
         "results": results,
         "disclaimer": DISCLAIMER,
     }
 
+    # Preserve previous response structure for single-model predictions.
     if len(results) == 1:
         single_result = next(iter(results.values()))
+
         response.update({
             "predicted_class": single_result["predicted_class"],
             "scores": single_result["scores"],
             "model_file": next(
-                MODEL_INFO[key]["filename"] for key in results
+                MODEL_INFO[key]["filename"]
+                for key in results
             ),
         })
 
@@ -306,14 +346,32 @@ def generate_report():
 
     try:
         model_choice = read_model_choice()
-        image, report_image = prepare_uploaded_image(uploaded_file)
+
+        image, report_image = prepare_uploaded_image(
+            uploaded_file
+        )
+
         patient_details = read_patient_details()
-        results = run_selected_predictions(image, model_choice)
+
+        results = run_selected_predictions(
+            image,
+            model_choice,
+        )
 
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    # Create the PDF in memory.
+    except Exception:
+        app.logger.exception("Report prediction failed.")
+
+        return jsonify({
+            "error": (
+                "Unable to generate the report. The server may have "
+                "insufficient memory or the model could not be loaded."
+            )
+        }), 500
+
+    # Create PDF in memory.
     pdf_buffer = BytesIO()
 
     document = SimpleDocTemplate(
@@ -328,7 +386,10 @@ def generate_report():
     styles = getSampleStyleSheet()
 
     story = [
-        Paragraph("Brain MRI Classification Report", styles["Title"]),
+        Paragraph(
+            "Brain MRI Classification Report",
+            styles["Title"],
+        ),
         Spacer(1, 0.25 * cm),
         Paragraph(
             "Generated: "
@@ -340,7 +401,10 @@ def generate_report():
             styles["Normal"],
         ),
         Spacer(1, 0.4 * cm),
-        Paragraph("Patient Information", styles["Heading2"]),
+        Paragraph(
+            "Patient Information",
+            styles["Heading2"],
+        ),
     ]
 
     # Patient information table.
@@ -365,14 +429,22 @@ def generate_report():
     story.extend([
         patient_table,
         Spacer(1, 0.5 * cm),
-        Paragraph("Uploaded MRI Image", styles["Heading2"]),
+        Paragraph(
+            "Uploaded MRI Image",
+            styles["Heading2"],
+        ),
         Spacer(1, 0.2 * cm),
     ])
 
     # Add uploaded image to PDF.
     image_buffer = BytesIO()
+
     report_image.thumbnail((1000, 1000))
-    report_image.save(image_buffer, format="JPEG", quality=90)
+    report_image.save(
+        image_buffer,
+        format="JPEG",
+        quality=90,
+    )
     image_buffer.seek(0)
 
     story.append(
@@ -386,7 +458,10 @@ def generate_report():
 
     story.extend([
         Spacer(1, 0.5 * cm),
-        Paragraph("Model Prediction Results", styles["Heading2"]),
+        Paragraph(
+            "Model Prediction Results",
+            styles["Heading2"],
+        ),
         Spacer(1, 0.2 * cm),
     ])
 
@@ -408,7 +483,12 @@ def generate_report():
 
     prediction_table = Table(
         prediction_rows,
-        colWidths=[4.3 * cm, 4.2 * cm, 3.5 * cm, 4 * cm],
+        colWidths=[
+            4.3 * cm,
+            4.2 * cm,
+            3.5 * cm,
+            4 * cm,
+        ],
         repeatRows=1,
     )
 
@@ -422,12 +502,16 @@ def generate_report():
     story.extend([
         prediction_table,
         Spacer(1, 0.4 * cm),
-        Paragraph("Class Scores", styles["Heading2"]),
+        Paragraph(
+            "Class Scores",
+            styles["Heading2"],
+        ),
         Spacer(1, 0.2 * cm),
     ])
 
-    # Include individual class scores for every selected model.
+    # Class scores for each model.
     for result in results.values():
+
         story.append(
             Paragraph(
                 escape(result["model_name"]),
@@ -462,17 +546,24 @@ def generate_report():
     # Educational disclaimer.
     story.extend([
         Spacer(1, 0.3 * cm),
-        Paragraph("Important Disclaimer", styles["Heading2"]),
-        Paragraph(escape(DISCLAIMER), styles["Normal"]),
+        Paragraph(
+            "Important Disclaimer",
+            styles["Heading2"],
+        ),
+        Paragraph(
+            escape(DISCLAIMER),
+            styles["Normal"],
+        ),
     ])
 
-    # Build the PDF document.
+    # Build PDF.
     try:
         document.build(story)
         pdf_buffer.seek(0)
 
     except Exception:
         app.logger.exception("PDF generation failed.")
+
         return jsonify({
             "error": "Unable to generate the PDF report."
         }), 500
@@ -490,4 +581,4 @@ def generate_report():
 # --------------------------------------------------
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)
